@@ -1,0 +1,4 @@
+.env
+results/stages_metrics.csv
+__pycache__/
+*.pyc

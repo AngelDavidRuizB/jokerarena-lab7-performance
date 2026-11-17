@@ -1,0 +1,105 @@
+# ==============================================================================
+# Lab 6 (Performance) - Despliegue aislado de 4 componentes (JokerArena)
+#   1. Base de datos:   jokerarena-neo4j (Neo4j 5.26)
+#   2. Microservicio:   jokerarena-leaderboard-stats-ms (Node/Fastify)
+#   3. API Gateway:     jokerarena-gateway (Nginx)
+#   4. Web Front-end:   jokerarena-web-ssr (Next.js SSR)
+# ==============================================================================
+name: jokerarena-perf
+
+services:
+  jokerarena-neo4j:
+    image: neo4j:5.26-community
+    container_name: jokerarena-perf-neo4j
+    restart: unless-stopped
+    environment:
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:?Defina NEO4J_PASSWORD en .env}
+      NEO4J_server_memory_heap_max__size: 512m
+    ports:
+      - "${NEO4J_HTTP_PORT:-7474}:7474"
+      - "${NEO4J_BOLT_PORT:-7687}:7687"
+    volumes:
+      - perf-neo4jdata:/data
+    cpus: 1.0
+    mem_limit: 1g
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:7474 >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    networks:
+      - jokerarena-net
+
+  jokerarena-leaderboard-stats-ms:
+    build:
+      context: ../Prototipo 1/services/leaderboard-stats-ms
+      dockerfile: Dockerfile
+    container_name: jokerarena-perf-leaderboard-ms
+    restart: unless-stopped
+    environment:
+      PORT: 8086
+      NEO4J_URL: bolt://jokerarena-neo4j:7687
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD}
+      # Se apunta a puertos cerrados locales para desactivar caché/broker y medir
+      # el flujo directo Microservicio -> Neo4j sin tiempos de espera.
+      REDIS_URL: redis://127.0.0.1:6399/0
+      RABBITMQ_URL: amqp://guest:guest@127.0.0.1:5699/
+      LOG_LEVEL: warn
+    depends_on:
+      jokerarena-neo4j:
+        condition: service_healthy
+    cpus: 0.5
+    mem_limit: 512m
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8086/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    networks:
+      - jokerarena-net
+
+  jokerarena-gateway:
+    build:
+      context: ../Prototipo 1/gateway
+      dockerfile: Dockerfile
+    container_name: jokerarena-perf-gateway
+    restart: unless-stopped
+    ports:
+      - "${GATEWAY_PORT:-8080}:8080"
+    depends_on:
+      jokerarena-leaderboard-stats-ms:
+        condition: service_healthy
+    cpus: 0.5
+    mem_limit: 256m
+    networks:
+      - jokerarena-net
+
+  jokerarena-web-ssr:
+    build:
+      context: ../Prototipo 1/clients/web-ssr
+      dockerfile: Dockerfile
+      args:
+        GATEWAY_INTERNAL_URL: http://jokerarena-gateway:8080
+    container_name: jokerarena-perf-web-ssr
+    restart: unless-stopped
+    environment:
+      GATEWAY_INTERNAL_URL: http://jokerarena-gateway:8080
+    ports:
+      - "${WEB_PORT:-3000}:3000"
+    depends_on:
+      jokerarena-gateway:
+        condition: service_healthy
+    cpus: 0.5
+    mem_limit: 512m
+    networks:
+      - jokerarena-net
+
+networks:
+  jokerarena-net:
+    name: jokerarena-perf-net
+
+volumes:
+  perf-neo4jdata:
